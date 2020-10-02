@@ -19,6 +19,9 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include "rfsCommon.h"
+#include "includes/config.h"
+#include "includes/Client.h"
 
 /*
  * Command line options
@@ -33,8 +36,6 @@ static struct options {
     int show_help;
 } options;
 
-const char srcpnt[] = "/home/daniel/CLionProjects/elmeutfg/srcpnt";
-const char altpnt[] = "/home/daniel/CLionProjects/elmeutfg/altpnt";
 
 #define OPTION(t, p)                           \
     { t, offsetof(struct options, p), 1 }
@@ -47,75 +48,6 @@ static const struct fuse_opt option_spec[] = {
         FUSE_OPT_END
 };
 
-static void fullpath_A(char *fpath, const char *path) {
-    strcpy(fpath, srcpnt);
-    strncat(fpath, path, PATH_MAX); // ridiculously long paths will break here
-}
-
-static void fullpath_B(char *fpath, const char *path) {
-    strcpy(fpath, altpnt);
-    strncat(fpath, path, PATH_MAX); // ridiculously long paths will break here
-}
-
-typedef struct fuse_file_info ffi;
-
-enum op_enum {
-    OP_MKDIR,
-    OP_UNLINK,
-    OP_RMDIR,
-    OP_RENAME,
-    OP_OPEN,
-    OP_RELEASE,
-    OP_WRITE,
-};
-
-typedef struct {
-    const char *tgt_path;
-    mode_t mode;
-} op_mkdir_t;
-typedef struct {
-    const char *tgt_path;
-} op_unlink_t;
-typedef struct {
-    const char *tgt_path;
-} op_rmdir_t;
-typedef struct {
-    const char *src_path;
-    const char *dst_path;
-} op_rename_t;
-typedef struct {
-    const char *path;
-    struct fuse_file_info *fi;
-} op_open_t;
-typedef struct {
-    struct fuse_file_info *fi;
-} op_release_t;
-typedef struct {
-    ffi *fi;
-    const char *buf;
-    size_t size;
-    off_t offset;
-} op_write_t;
-
-typedef union {
-    op_mkdir_t op_mkdir;
-    op_unlink_t op_unlink;
-    op_rmdir_t op_rmdir;
-    op_rename_t op_rename;
-    op_open_t op_open;
-    op_release_t op_release;
-    op_write_t op_write;
-} op_union;
-
-typedef struct {
-    enum op_enum op;
-    int result;
-    int done;
-    pthread_mutex_t mut;
-    pthread_cond_t cond;
-    op_union data;
-} op_t;
-
 #define QSIZE 64
 typedef struct {
     int index;
@@ -126,6 +58,9 @@ typedef struct {
     op_t *queue[QSIZE];
 } queue_t; // = {, 0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
 
+static pthread_mutex_t slave_mut = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t slave_cond = PTHREAD_COND_INITIALIZER;
+
 int q_empty(queue_t *queue) { return queue->size == 0; }
 
 int q_full(queue_t *queue) { return queue->size == QSIZE; }
@@ -134,7 +69,6 @@ void enqueue(queue_t *queue, op_t *val) {
     pthread_mutex_lock(&queue->mutex);
     int was_empty = q_empty(queue);
     while (q_full(queue)) {
-        printf("Enqueue: full. Schleeping.\n");
         pthread_cond_wait(&queue->cond_full, &queue->mutex);
     }
     queue->queue[(queue->index + queue->size) % QSIZE] = val;
@@ -147,7 +81,6 @@ op_t *dequeue(queue_t *queue) {
     pthread_mutex_lock(&queue->mutex);
     int was_full = q_full(queue);
     while (q_empty(queue)) {
-        printf("Dequeue: empty. Schleeping.\n");
         pthread_cond_wait(&queue->cond_empty, &queue->mutex);
     }
     op_t *retval = queue->queue[queue->index];
@@ -162,7 +95,8 @@ op_t *dequeue(queue_t *queue) {
 queue_t wr_queue_A = {0, 0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
 queue_t wr_queue_B = {0, 0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER};
 
-_Noreturn void *dispatcher_AB(void *q);
+_Noreturn void *dispatcher_local(void *q);
+_Noreturn void *dispatcher_remote();
 
 typedef struct {
 //    queue_t *q;   UNNECESSARY IF WE SPECIFY "PERSONALITY".........
@@ -171,70 +105,33 @@ typedef struct {
 
 static void *hello_init(struct fuse_conn_info *conn, struct fuse_config *cfg) {
     (void) conn;
-//    cfg->kernel_cache = 0;
-    /* In this case both "queues" use the same kind of dispatcher: it writes to a local directory on a disk.
-     */
+    cfg->kernel_cache = 0;
+    cfg->direct_io = 1;
+
     pthread_t bogus;
     dispatcher_param_t *dispatcherParam;
 
     dispatcherParam = malloc(sizeof(dispatcher_param_t));
     dispatcherParam->personality = 'A';
-//    dispatcherParam->q = &wr_queue_A;
-    pthread_create(&bogus, NULL, dispatcher_AB, dispatcherParam);
+    pthread_create(&bogus, NULL, dispatcher_local, dispatcherParam);
     pthread_detach(bogus);
 
-    dispatcherParam = malloc(sizeof(dispatcher_param_t));
-    dispatcherParam->personality = 'B';
-//    dispatcherParam->q = &wr_queue_B;
-    pthread_create(&bogus, NULL, dispatcher_AB, dispatcherParam);
+//    dispatcherParam = malloc(sizeof(dispatcher_param_t));
+//    dispatcherParam->personality = 'B';
+    client_setLogLevel(LOG_LEVEL_DEBUG);
+    client_setReplyTimeout(5);
+    client_setServicePort(1420);
+    client_setServerAddress("127.0.0.1");
+    client_init();
+    client_createClientSocket();
+    client_connect();
+
+    pthread_create(&bogus, NULL, dispatcher_remote, NULL);
     pthread_detach(bogus);
 
     return NULL;
 }
 
-static int hello_getattr(const char *path, struct stat *stbuf,
-                         struct fuse_file_info *fi) {
-    printf("%ld\n", pthread_self());
-    (void) fi;
-    memset(stbuf, 0, sizeof(struct stat));
-    char fullpath[PATH_MAX];
-    fullpath_A(fullpath, path);
-    errno = 0;
-    lstat(fullpath, stbuf);
-    return -errno;
-}
-
-static int hello_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                         off_t offset, struct fuse_file_info *fi,
-                         enum fuse_readdir_flags flags) {
-    (void) offset;
-    (void) fi;
-    (void) flags;
-    char fullpath[2048];
-    fullpath_A(fullpath, path);
-    DIR *mydir = opendir(fullpath);
-    struct dirent *d;
-    errno = 0;
-    while (d = readdir(mydir)) {
-        assert(!errno);
-        filler(buf, d->d_name, NULL, 0, 0);
-    }
-    closedir(mydir);
-    return 0;
-}
-
-static int hello_readlink(const char *path, char *buf, size_t bufsize) {
-    char fullpath[PATH_MAX];
-    fullpath_A(fullpath, path);
-    errno = 0;
-    int res = readlink(fullpath, buf, bufsize);
-    int errsv = errno;
-    buf[res] = '\0';
-    if (res < 0) {
-        return -errsv;
-    }
-    return 0;
-}
 
 static int generic_enqueue_and_wait(op_t *op_A, op_t *op_B) {
     enqueue(&wr_queue_A, op_A);
@@ -248,20 +145,6 @@ static int generic_enqueue_and_wait(op_t *op_A, op_t *op_B) {
 
     assert(op_A->result == op_B->result);  // TODO not necessarily the same, this is also indication of backend failure.
     return op_A->result;
-}
-
-static int hello_mkdir_AB(const char *path, mode_t mode, const char pers) {
-    mode = mode | S_IFDIR;
-    char fullpath[PATH_MAX];
-    if (pers == 'A') fullpath_A(fullpath, path);
-    if (pers == 'B') fullpath_B(fullpath, path);
-    errno = 0;
-    int ret = mkdir(fullpath, mode);
-    int errsv = errno;
-    if (ret < 0) {
-        return -errsv;
-    }
-    return 0;
 }
 
 static int hello_mkdir(const char *path, mode_t mode) {
@@ -281,37 +164,12 @@ static int hello_mkdir(const char *path, mode_t mode) {
 //    return op_A.result;
 }
 
-static int hello_unlink_AB(const char *path, char pers) {
-    char fullpath[PATH_MAX];
-    if (pers == 'A') fullpath_A(fullpath, path);
-    if (pers == 'B') fullpath_B(fullpath, path);
-    errno = 0;
-    int ret = unlink(fullpath);
-    int errsv = errno;
-    if (ret < 0) {
-        return -errsv;
-    }
-    return 0;
-}
-
 static int hello_unlink(const char *path) {
     op_t op_A = {.op = OP_UNLINK, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_unlink = {.tgt_path = path}};
     op_t op_B = {.op = OP_UNLINK, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_unlink = {.tgt_path = path}};
     return generic_enqueue_and_wait(&op_A, &op_B);
 }
 
-static int hello_rmdir_AB(const char *path, char pers) {
-    char fullpath[PATH_MAX];
-    if (pers == 'A') fullpath_A(fullpath, path);
-    if (pers == 'B') fullpath_B(fullpath, path);
-    errno = 0;
-    int ret = rmdir(fullpath);
-    int errsv = errno;
-    if (ret < 0) {
-        return -errsv;
-    }
-    return 0;
-}
 
 static int hello_rmdir(const char *path) {
     op_t op_A = {.op = OP_RMDIR, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_rmdir = {.tgt_path = path}};
@@ -319,25 +177,6 @@ static int hello_rmdir(const char *path) {
     return generic_enqueue_and_wait(&op_A, &op_B);
 }
 
-static int hello_rename_AB(const char *src_path, const char *dst_path, char pers) {
-    char src_fullpath[PATH_MAX];
-    char dst_fullpath[PATH_MAX];
-    if (pers == 'A') {
-        fullpath_A(src_fullpath, src_path);
-        fullpath_A(dst_fullpath, dst_path);
-    }
-    if (pers == 'B') {
-        fullpath_B(src_fullpath, src_path);
-        fullpath_B(dst_fullpath, dst_path);
-    }
-    errno = 0;
-    int ret = rename(src_fullpath, dst_fullpath);
-    int errsv = errno;
-    if (ret < 0) {
-        return -errsv;
-    }
-    return 0;
-}
 
 static int hello_rename(const char *src_path, const char *dst_path, unsigned int flags) {
 //    assert(!flags);  // neither RENAME_EXCHANGE nor RENAME_NOREPLACE implemented in our code.
@@ -348,33 +187,6 @@ static int hello_rename(const char *src_path, const char *dst_path, unsigned int
     return generic_enqueue_and_wait(&op_A, &op_B);
 }
 
-typedef union {
-    uint64_t real;
-    struct {
-        int a;
-        int b;
-    } inner;
-} myhack_t;
-
-static int hello_open_AB(const char *path, struct fuse_file_info *fi, char pers) {
-    char fullpath[PATH_MAX];
-    if (pers == 'A') fullpath_A(fullpath, path);
-    if (pers == 'B') fullpath_B(fullpath, path);
-//    myhack_t *myhack = (myhack_t *) &fi->fh;
-//    int *my_fh = &myhack->inner.a;
-    int *my_fh;
-    if (pers == 'A') my_fh = &((myhack_t *) &fi->fh)->inner.a;
-    if (pers == 'B') my_fh = &((myhack_t *) &fi->fh)->inner.b;
-    errno = 0;
-    int ret = open(fullpath, fi->flags);
-    int errsv = errno;
-    if (ret < 0) {
-        *my_fh = -1;
-        return -errsv;
-    }
-    *my_fh = ret;
-    return 0;
-}
 
 static int hello_open(const char *path, struct fuse_file_info *fi) {
     op_t op_A = {.op = OP_OPEN, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_open = {.path = path, fi = fi}};
@@ -385,53 +197,11 @@ static int hello_open(const char *path, struct fuse_file_info *fi) {
     return retval;
 }
 
-static int hello_read(const char *path, char *buf, size_t size, off_t offset,
-                      struct fuse_file_info *fi) {
-    int ret = pread(((myhack_t) fi->fh).inner.a, buf, size, offset);
-    if (ret < 0) {
-        return -errno;
-    }
-    if (ret != size) {
-        printf("WARNING: pread gave us %d out of requested %d bytes.\n", ret, (int) size);
-    }
-    return ret;
-}
-
-static int hello_release_AB(struct fuse_file_info *fi, char pers) {
-    int *my_fh;
-    if (pers == 'A') my_fh = &((myhack_t *) &fi->fh)->inner.a;
-    if (pers == 'B') my_fh = &((myhack_t *) &fi->fh)->inner.b;
-    int ret = close(*my_fh);
-    if (ret < 0) {
-        return -errno;
-    }
-    return ret;
-}
-
 static int hello_release(const char *path, struct fuse_file_info *fi) {
     (void) path;
     op_t op_A = {.op = OP_RELEASE, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_release = {fi = fi}};
     op_t op_B = {.op = OP_RELEASE, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_release = {fi = fi}};
     return generic_enqueue_and_wait(&op_A, &op_B);
-}
-
-static int hello_write_AB(const char *buf, size_t size, off_t offset, ffi *fi, char pers) {
-    int *my_fh;
-    size_t orig_size = size;
-    if (pers == 'A') my_fh = &((myhack_t *) &fi->fh)->inner.a;
-    if (pers == 'B') my_fh = &((myhack_t *) &fi->fh)->inner.b;
-    int retval;
-    while (size) {
-        retval = pwrite(*my_fh, buf, size, offset);
-        assert(retval);  // it'd be weird if pwrite transfers 0 bytes without error (?)
-        if (retval < 0) {
-            int errsv = errno;
-            return -errsv;
-        }
-        offset += retval;
-        size -= retval;
-    }
-    return orig_size;
 }
 
 static int hello_write(const char *path, const char *buf, size_t size, off_t offset, ffi *fi) {
@@ -442,7 +212,14 @@ static int hello_write(const char *path, const char *buf, size_t size, off_t off
     return generic_enqueue_and_wait(&op_A, &op_B);
 }
 
-_Noreturn void *dispatcher_AB(void *arg) {
+int *obtain_dehacked_fh(struct fuse_file_info *fi, char pers) {
+    assert(pers == 'A' || pers == 'B');
+    return pers == 'A' ?
+           &((myhack_t *) &fi->fh)->inner.a :
+           &((myhack_t *) &fi->fh)->inner.b;
+}
+
+_Noreturn void *dispatcher_local(void *arg) {
     /* In this iteration of development, dispatchers and worker functions do essentially the same for backends
      A and B, i.e. write to a directory in the local filesystem. Hence they are reused, with a "personality
      argument to denote which backend they're writing to.
@@ -450,43 +227,56 @@ _Noreturn void *dispatcher_AB(void *arg) {
     dispatcher_param_t *dispatcherParam = arg;
     char pers = dispatcherParam->personality;
     queue_t *q;
-    printf("ptr: %p\t, pers: %c\n", arg, pers);
-    switch (pers) {
+    const char *prepath;
+    printf("ptr: %p\t, pers: %c\n", arg, dispatcherParam->personality);
+    switch (dispatcherParam->personality) {
         case 'A':
             q = &wr_queue_A;
+            prepath = "/home/daniel/CLionProjects/elmeutfg/srcpnt";
             break;
         case 'B':
             q = &wr_queue_B;
+            prepath = "/home/daniel/CLionProjects/elmeutfg/altpnt";
             break;
         default:
             assert(0);
     }
     op_t *nextop;
     int retval;
-    while (1) {
+    for (;;) {
         nextop = dequeue(q);
         switch (nextop->op) {
             case OP_MKDIR:
-                retval = hello_mkdir_AB(nextop->data.op_mkdir.tgt_path, nextop->data.op_mkdir.mode, pers);
+                retval = hello_mkdir_AB(nextop->data.op_mkdir.tgt_path, nextop->data.op_mkdir.mode, prepath);
                 break;
             case OP_UNLINK:
-                retval = hello_unlink_AB(nextop->data.op_unlink.tgt_path, pers);
+                retval = hello_unlink_AB(nextop->data.op_unlink.tgt_path, prepath);
                 break;
             case OP_RMDIR:
-                retval = hello_rmdir_AB(nextop->data.op_rmdir.tgt_path, pers);
+                retval = hello_rmdir_AB(nextop->data.op_rmdir.tgt_path, prepath);
                 break;
             case OP_RENAME:
-                retval = hello_rename_AB(nextop->data.op_rename.src_path, nextop->data.op_rename.dst_path, pers);
+                retval = hello_rename_AB(nextop->data.op_rename.src_path, nextop->data.op_rename.dst_path, prepath);
                 break;
-            case OP_OPEN:
-                retval = hello_open_AB(nextop->data.op_open.path, nextop->data.op_open.fi, pers);
+            case OP_OPEN: {
+                // WARNING. The code here has the "lower" function set (as side-effect) the 'fh' field with the returned file descriptor.
+                //  In the "remote" version, it will have to be returned instead, and (myhack_t) op->fi->fh set in the body of this dispatcher.
+                op_open_t *o = &(nextop->data.op_open);
+                int *fh = obtain_dehacked_fh(o->fi, pers);
+                int flags = o->fi->flags;
+                retval = hello_open_AB(nextop->data.op_open.path, flags, fh, prepath);
                 break;
-            case OP_RELEASE:
-                retval = hello_release_AB(nextop->data.op_release.fi, pers);
+            }
+            case OP_RELEASE: {
+                op_release_t *o = &(nextop->data.op_release);
+                int *fh = obtain_dehacked_fh(o->fi, pers);
+                retval = hello_release_AB(fh);
                 break;
+            }
             case OP_WRITE: {
                 op_write_t *o = &(nextop->data.op_write);
-                retval = hello_write_AB(o->buf, o->size, o->offset, o->fi, pers);
+                int *fh = obtain_dehacked_fh(o->fi, pers);
+                retval = hello_write_AB(o->buf, o->size, o->offset, fh);
                 break;
             }
             default:
@@ -500,6 +290,157 @@ _Noreturn void *dispatcher_AB(void *arg) {
     }
     //heh
     free(arg);
+}
+
+void *dispatcher_remote() {
+    //Dequeues operations and sends them to the slave node.
+    // N of these functions concurrently running spawned by FUSE
+    // BEGIN init section
+    char pers = 'B'; //TODO: Hardcoded
+    queue_t *q = &wr_queue_B; //TODO: Hardcoded
+    op_t *nextop;
+
+
+    int retval;
+    int bufsize;
+    // END init section
+    for (;;) {
+        Message * msg = client_createMessage();
+        char *msg_buf, *msg_buf_cpy;
+        msg_buf = msg_buf_cpy = message_buffer(msg);
+
+        nextop = dequeue(q);
+        switch (nextop->op) {
+            case OP_MKDIR: {
+                //set ser_*_t fields
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_MKDIR;
+                ser_mkdir_t *tmp2 = &tmp->data.ser_mkdir;
+                tmp2->tgt_path_L = strlen(nextop->data.op_mkdir.tgt_path) + 1;
+                tmp2->mode = nextop->data.op_mkdir.mode;
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_mkdir.tgt_path, tmp2->tgt_path_L);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                break;
+            }
+            case OP_UNLINK: {
+                //set ser_*_t fields
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_UNLINK;
+                ser_unlink_t *tmp2 = &tmp->data.ser_unlink;
+                tmp2->tgt_path_L = strlen(nextop->data.op_unlink.tgt_path) + 1;
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_unlink.tgt_path, tmp2->tgt_path_L);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                break;
+            }
+            case OP_RMDIR: {
+                //set ser_*_t fields
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_RMDIR;
+                ser_rmdir_t *tmp2 = &tmp->data.ser_rmdir;
+                tmp2->tgt_path_L = strlen(nextop->data.op_rmdir.tgt_path) + 1;
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_rmdir.tgt_path, tmp2->tgt_path_L);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                break;
+            }
+            case OP_RENAME: {
+                //set ser_*_t fields
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_RENAME;
+                ser_rename_t *tmp2 = &tmp->data.ser_rename;
+                tmp2->src_path_L = strlen(nextop->data.op_rename.src_path) + 1;
+                tmp2->dst_path_L = strlen(nextop->data.op_rename.dst_path) + 1;
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_rename.src_path, tmp2->src_path_L);
+                //set 2 data field
+                msg_buf_cpy += tmp2->src_path_L;
+                memcpy(msg_buf_cpy, nextop->data.op_rename.dst_path, tmp2->dst_path_L);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->src_path_L + tmp2->dst_path_L;
+                break;
+            }
+            case OP_OPEN: {
+                // WARNING. The code here has the "lower" function set (as side-effect) the 'fh' field with the returned file descriptor.
+                //  In the "remote" version, it will have to be returned instead, and (myhack_t) op->fi->fh set in the body of this dispatcher.
+                //set ser_*_t fields
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_OPEN;
+                ser_open_t *tmp2 = &tmp->data.ser_open;
+                tmp2->path_L = strlen(nextop->data.op_open.path) + 1;
+                tmp2->flags = nextop->data.op_open.fi->flags;
+//                tmp2->fh = *obtain_dehacked_fh(nextop->data.op_open.fi, 'B'); NOT NEEDED, IT IS SET BELOW, NOT USED HERE.
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_open.path, tmp2->path_L);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->path_L;
+                break;
+            }
+            case OP_RELEASE: {
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_RELEASE;
+                ser_release_t *tmp2 = &tmp->data.ser_release;
+                tmp2->fh = *obtain_dehacked_fh(nextop->data.op_release.fi, 'B');
+                break;
+            }
+            case OP_WRITE: {
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_WRITE;
+                ser_write_t *tmp2 = &tmp->data.ser_write;
+                tmp2->offset = nextop->data.op_write.offset;
+                tmp2->size = nextop->data.op_write.size;
+                tmp2->fh = *obtain_dehacked_fh(nextop->data.op_write.fi, 'B');
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_write.buf, tmp2->size);
+                //set total bufsize
+                bufsize = sizeof(ser_t) + tmp2->size;
+                break;
+            }
+            default:
+                assert(0);
+        }
+        message_setSize(msg, bufsize);
+
+        pthread_mutex_lock(&slave_mut);
+//        printf("TID %luz enetered slavemut\n", pthread_self());
+//        printf("TID %luz sending %s\n", pthread_self(), msg_buf + sizeof(ser_t));
+        assert(client_sendMessage(msg));
+        message_destroy(msg);
+        msg = client_createMessage();
+        assert(client_recvMessage(msg));
+        pthread_cond_signal(&slave_cond);
+//        printf("TID %luz leaving slavemut\n", pthread_self());
+        pthread_mutex_unlock(&slave_mut);
+
+        int recvMsgLen = message_size(msg);
+        assert(recvMsgLen == sizeof(ser_res_t));
+        ser_res_t* result = (ser_res_t*) message_buffer(msg);
+        retval = result->retval;
+        if (nextop->op == OP_OPEN) {
+            op_open_t *o = &(nextop->data.op_open);
+            int *fh = obtain_dehacked_fh(o->fi, pers);
+            printf("Snake, we just hit OP_OPEN! Let's check the value of fh: %d\n", result->fh);
+            *fh = result->fh;
+        }
+        message_destroy(msg);
+
+        pthread_mutex_lock(&nextop->mut);
+        nextop->result = retval;
+        nextop->done = 1;
+        pthread_cond_signal(&nextop->cond);
+        pthread_mutex_unlock(&nextop->mut);
+    }
+
 }
 
 static const struct fuse_operations hello_oper = {
@@ -536,6 +477,8 @@ static void show_help(const char *progname) {
 }
 
 int main(int argc, char *argv[]) {
+    srcpnt = "/home/daniel/CLionProjects/elmeutfg/srcpnt";
+    altpnt = "/home/daniel/CLionProjects/elmeutfg/altpnt";
     int ret;
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     /* Set defaults -- we have to use strdup so that

@@ -3,4 +3,6 @@ project(elmeutfg C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(elmeutfg main.c)
+add_executable(rfsMaster_m2 rfsMaster_m2.c rfsCommon.c)
+
+add_executable(rfsSlave_m2 rfsSlave_m2.c rfsCommon.c)
