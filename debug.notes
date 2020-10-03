@@ -1,0 +1,8 @@
+# Compiles and links with symbol map (?) information
+gcc -Wl,-Map=elmeutfgexe.map -finstrument-functions -g -pthread main.c instrument.c -lfuse3 -o elmeutfg
+
+https://web.archive.org/web/20130528172555/http://www.ibm.com/developerworks/library/l-graphvis/
+
+#######################
+
+

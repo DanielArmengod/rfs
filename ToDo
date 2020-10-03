@@ -1,0 +1,1 @@
+dispatcher_* functions are only spawned once. That's kinda dumb ngl.

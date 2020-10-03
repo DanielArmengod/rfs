@@ -20,8 +20,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include "rfsCommon.h"
-#include "includes/config.h"
-#include "includes/Client.h"
+#include <nng/nng.h>
+#include <nng/protocol/reqrep0/req.h>
 
 /*
  * Command line options
@@ -103,29 +103,32 @@ typedef struct {
     char personality;  // """const"""          FUCK C
 } dispatcher_param_t;
 
+nng_socket globSock;
+
 static void *hello_init(struct fuse_conn_info *conn, struct fuse_config *cfg) {
     (void) conn;
+    // Disable as many caches as possible, just to be on the safe side.
     cfg->kernel_cache = 0;
     cfg->direct_io = 1;
 
     pthread_t bogus;
     dispatcher_param_t *dispatcherParam;
 
+    // Global 'A'-side init
+      // ... To be implemented.
+    // 'A'-side dispatcher(s) spawn.
     dispatcherParam = malloc(sizeof(dispatcher_param_t));
     dispatcherParam->personality = 'A';
     pthread_create(&bogus, NULL, dispatcher_local, dispatcherParam);
     pthread_detach(bogus);
 
-//    dispatcherParam = malloc(sizeof(dispatcher_param_t));
-//    dispatcherParam->personality = 'B';
-    client_setLogLevel(LOG_LEVEL_DEBUG);
-    client_setReplyTimeout(5);
-    client_setServicePort(1420);
-    client_setServerAddress("127.0.0.1");
-    client_init();
-    client_createClientSocket();
-    client_connect();
+    // Global 'B'-side init
+    int rv;
+    rv = nng_req0_open(&globSock); //TODO errcheck
+    rv = nng_dial(globSock, "tcp://127.0.0.1:1420", NULL, 0); //TODO errcheck
 
+      // ... To be implemented.
+    // 'B'-side dispatcher(s) spawn.
     pthread_create(&bogus, NULL, dispatcher_remote, NULL);
     pthread_detach(bogus);
 
@@ -151,17 +154,6 @@ static int hello_mkdir(const char *path, mode_t mode) {
     op_t op_A = {.op = OP_MKDIR, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_mkdir = {.mode = mode, .tgt_path = path}};
     op_t op_B = {.op = OP_MKDIR, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_mkdir = {.mode = mode, .tgt_path = path}};
     return generic_enqueue_and_wait(&op_A, &op_B);
-//    enqueue(&wr_queue_A, &op_A);
-//    enqueue(&wr_queue_B, &op_B);
-//
-//    pthread_mutex_lock(&op_A.mut);
-//    while (!op_A.done) pthread_cond_wait(&op_A.cond, &op_A.mut);  // TODO add timeouts on the same condition
-//
-//    pthread_mutex_lock(&op_B.mut);
-//    while (!op_B.done) pthread_cond_wait(&op_B.cond, &op_B.mut);  // TODO add timeouts on the same condition
-//
-//    assert(op_A.result == op_B.result);  // TODO not necessarily the same, this is also indication of backend failure.
-//    return op_A.result;
 }
 
 static int hello_unlink(const char *path) {
@@ -294,21 +286,20 @@ _Noreturn void *dispatcher_local(void *arg) {
 
 void *dispatcher_remote() {
     //Dequeues operations and sends them to the slave node.
-    // N of these functions concurrently running spawned by FUSE
+    // #? of these functions concurrently running spawned by ME I GUESS.
     // BEGIN init section
     char pers = 'B'; //TODO: Hardcoded
     queue_t *q = &wr_queue_B; //TODO: Hardcoded
-    op_t *nextop;
+    nng_socket *sock = &globSock;
+    //TODO set socket context (?)
 
-
+    char msg_buf[2*1024*1024];  //big chonker
     int retval;
-    int bufsize;
+    size_t buf_size;
+    op_t *nextop;
     // END init section
     for (;;) {
-        Message * msg = client_createMessage();
-        char *msg_buf, *msg_buf_cpy;
-        msg_buf = msg_buf_cpy = message_buffer(msg);
-
+        char *msg_buf_cpy = msg_buf;
         nextop = dequeue(q);
         switch (nextop->op) {
             case OP_MKDIR: {
@@ -321,8 +312,8 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_mkdir.tgt_path, tmp2->tgt_path_L);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->tgt_path_L;
                 break;
             }
             case OP_UNLINK: {
@@ -334,8 +325,8 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_unlink.tgt_path, tmp2->tgt_path_L);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->tgt_path_L;
                 break;
             }
             case OP_RMDIR: {
@@ -347,8 +338,8 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_rmdir.tgt_path, tmp2->tgt_path_L);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->tgt_path_L;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->tgt_path_L;
                 break;
             }
             case OP_RENAME: {
@@ -364,8 +355,8 @@ void *dispatcher_remote() {
                 //set 2 data field
                 msg_buf_cpy += tmp2->src_path_L;
                 memcpy(msg_buf_cpy, nextop->data.op_rename.dst_path, tmp2->dst_path_L);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->src_path_L + tmp2->dst_path_L;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->src_path_L + tmp2->dst_path_L;
                 break;
             }
             case OP_OPEN: {
@@ -381,8 +372,8 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_open.path, tmp2->path_L);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->path_L;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->path_L;
                 break;
             }
             case OP_RELEASE: {
@@ -402,29 +393,19 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_write.buf, tmp2->size);
-                //set total bufsize
-                bufsize = sizeof(ser_t) + tmp2->size;
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->size;
                 break;
             }
             default:
                 assert(0);
         }
-        message_setSize(msg, bufsize);
-
-        pthread_mutex_lock(&slave_mut);
-//        printf("TID %luz enetered slavemut\n", pthread_self());
-//        printf("TID %luz sending %s\n", pthread_self(), msg_buf + sizeof(ser_t));
-        assert(client_sendMessage(msg));
-        message_destroy(msg);
-        msg = client_createMessage();
-        assert(client_recvMessage(msg));
-        pthread_cond_signal(&slave_cond);
-//        printf("TID %luz leaving slavemut\n", pthread_self());
-        pthread_mutex_unlock(&slave_mut);
-
-        int recvMsgLen = message_size(msg);
-        assert(recvMsgLen == sizeof(ser_res_t));
-        ser_res_t* result = (ser_res_t*) message_buffer(msg);
+        printf("TID %lu sending %zu\n", pthread_self(), buf_size);
+        nng_send(*sock, msg_buf, buf_size, 0);
+        buf_size = 2 * 1024 * 1024;
+        nng_recv(*sock, msg_buf, &buf_size, 0);
+        assert(buf_size == sizeof(ser_res_t));
+        ser_res_t* result = (ser_res_t*) msg_buf;
         retval = result->retval;
         if (nextop->op == OP_OPEN) {
             op_open_t *o = &(nextop->data.op_open);
@@ -432,7 +413,6 @@ void *dispatcher_remote() {
             printf("Snake, we just hit OP_OPEN! Let's check the value of fh: %d\n", result->fh);
             *fh = result->fh;
         }
-        message_destroy(msg);
 
         pthread_mutex_lock(&nextop->mut);
         nextop->result = retval;
