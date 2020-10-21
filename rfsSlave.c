@@ -10,14 +10,11 @@ _Noreturn void rfsSlave();
 
 int main(void)
 {
-    altpnt = "/home/daniel/CLionProjects/elmeutfg/altpnt";
-
     int rv;
     rv = nng_rep0_open(&globSock);
     rv = nng_listen(globSock, "tcp://127.0.0.1:1420", NULL, 0);
     rfsSlave();
 }
-
 
 _Noreturn void rfsSlave()
 {
@@ -26,9 +23,8 @@ _Noreturn void rfsSlave()
     for (;;)
     {
         size_t buf_size = 2 * 1024 * 1024;
-        int rv;
         printf("Slave thread #%lu ready for more.\n", pthread_self());
-        rv = nng_recv(*sock, msg_buf, &buf_size, 0);
+        cnc(nng_recv(*sock, msg_buf, &buf_size, 0));
         printf("received message size %zu (thread #%lu)\n", buf_size, pthread_self());
         ser_t *received = (ser_t*) msg_buf;
         ser_res_t result;
@@ -41,10 +37,20 @@ _Noreturn void rfsSlave()
                 char *dataBegin = msg_buf + sizeof(*received);
                 strcpy(path, dataBegin);
                 //do actual operation
-                printf("mkdirab\t%s\t%d\t%s\n",path,mode,altpnt);
-                result.retval = hello_mkdir_AB(path, mode, altpnt);
-                if (result.retval)
-                    printf("WARNING: op write returned %d\n", result.retval);
+                printf("mkdirab\t%s\t%d\t%s\n", path, mode, ladoB);
+                result.retval = hello_mkdir_AB(path, mode, ladoB);
+                break;
+            }
+            case OP_MKNOD: {
+                //unmarshall stuff
+                ser_mknod_t *tmp = (ser_mknod_t *) &received->data.ser_mknod;
+                int mode = tmp->mode;
+                char path[PATH_MAX];
+                char *dataBegin = msg_buf + sizeof(*received);
+                strcpy(path, dataBegin);
+                //do actual operation
+                printf("mknodab\t%s\t%d\t%s\n", path, mode, ladoB);
+                result.retval = hello_mknod_AB(path, mode, ladoB);
                 break;
             }
             case OP_UNLINK: {
@@ -52,9 +58,9 @@ _Noreturn void rfsSlave()
                 char path[PATH_MAX];
                 char *dataBegin = msg_buf + sizeof(*received);
                 strcpy(path, dataBegin);
-                printf("unlinkab\t%s\t%s\n",path,altpnt);
+                printf("unlinkab\t%s\t%s\n", path, ladoB);
                 //do actual operation
-                result.retval = hello_unlink_AB(path,altpnt);
+                result.retval = hello_unlink_AB(path, ladoB);
                 if (result.retval)
                     printf("WARNING: op unlink returned %d\n", result.retval);
                 break;
@@ -64,9 +70,9 @@ _Noreturn void rfsSlave()
                 char path[PATH_MAX];
                 char *dataBegin = msg_buf + sizeof(*received);
                 strcpy(path, dataBegin);
-                printf("rmdirab\t%s\t%s\n",path,altpnt);
+                printf("rmdirab\t%s\t%s\n", path, ladoB);
                 //do actual operation
-                result.retval = hello_rmdir_AB(path,altpnt);
+                result.retval = hello_rmdir_AB(path, ladoB);
                 if (result.retval)
                     printf("WARNING: op rmdirab returned %d\n", result.retval);
                 break;
@@ -79,9 +85,9 @@ _Noreturn void rfsSlave()
                 strcpy(path1, dataBegin);
                 dataBegin += strlen(path1)+1;
                 strcpy(path2, dataBegin);
-                printf("renameab\t%s  --> %s\t%s\n",path1,path2,altpnt);
+                printf("renameab\t%s  --> %s\t%s\n", path1, path2, ladoB);
                 //do actual operation
-                result.retval = hello_rename_AB(path1,path2,altpnt);
+                result.retval = hello_rename_AB(path1, path2, ladoB);
                 if (result.retval)
                     printf("WARNING: op renameab returned %d\n", result.retval);
                 break;
@@ -89,16 +95,14 @@ _Noreturn void rfsSlave()
             case OP_OPEN: {
                 ser_open_t *tmp = (ser_open_t *) &received->data.ser_open;
                 int flags = tmp->flags;
-                int fh;
                 char path[PATH_MAX];
                 char *dataBegin = msg_buf + sizeof(*received);
                 strcpy(path, dataBegin);
-                printf("openab\t%s\t%s\n",path,altpnt);
+                printf("openab\t%s\t%s\n", path, ladoB);
                 //do actual operation
-                result.retval = hello_open_AB(path, flags, &fh, altpnt);
+                result.retval = hello_open_AB(path, flags, &result.fh, ladoB);
                 if (result.retval)
                     printf("WARNING: op openab returned %d\n", result.retval);
-                result.fh = fh;
                 break;
             }
             case OP_RELEASE: {
@@ -126,7 +130,7 @@ _Noreturn void rfsSlave()
             default:
                 assert(0);
         }
-        nng_send(*sock, &result, sizeof(result), 0);
+        cnc(nng_send(*sock, &result, sizeof(result), 0));
         printf("ok, replying (thread #%lu)\n\n", pthread_self());
     }
 }

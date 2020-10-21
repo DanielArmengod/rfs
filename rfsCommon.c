@@ -1,10 +1,7 @@
 #include "rfsCommon.h"
 
-const char *srcpnt;
-const char *altpnt;
-
 static void fullpath_A(char *fpath, const char *path) {
-    strcpy(fpath, srcpnt);
+    strcpy(fpath, ladoA);
     strncat(fpath, path, PATH_MAX); // ridiculously long paths will break here
 }
 
@@ -22,6 +19,18 @@ int hello_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *f
     errno = 0;
     lstat(fullpath, stbuf);
     return -errno;
+}
+
+int hello_mknod_AB(const char *path, mode_t mode, const char *prepath) {
+    assert(mode & S_IFREG);
+    char fullpath[PATH_MAX];
+    make_fullpath(fullpath, prepath, path);
+    int ret = mknod(fullpath, mode, 0);
+    int errsv = errno;
+    if (ret < 0) {
+        return -errsv;
+    }
+    return 0;
 }
 
 int hello_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi,
@@ -160,4 +169,11 @@ int hello_write_AB(const char *buf, size_t size, off_t offset, const int *fh) {
         size -= retval;
     }
     return orig_size;
+}
+
+
+void cnc(int val) {
+    if (val == -1) {
+        printf("***************************Error num %d\n", errno);
+    }
 }

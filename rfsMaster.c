@@ -156,6 +156,12 @@ static int hello_mkdir(const char *path, mode_t mode) {
     return generic_enqueue_and_wait(&op_A, &op_B);
 }
 
+static int hello_mknod(const char *path, mode_t mode, dev_t dev) {
+    op_t op_A = {.op = OP_MKNOD, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_mknod = {.mode = mode, .tgt_path = path}};
+    op_t op_B = {.op = OP_MKNOD, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_mknod = {.mode = mode, .tgt_path = path}};
+    return generic_enqueue_and_wait(&op_A, &op_B);
+}
+
 static int hello_unlink(const char *path) {
     op_t op_A = {.op = OP_UNLINK, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_unlink = {.tgt_path = path}};
     op_t op_B = {.op = OP_UNLINK, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_unlink = {.tgt_path = path}};
@@ -198,7 +204,6 @@ static int hello_release(const char *path, struct fuse_file_info *fi) {
 
 static int hello_write(const char *path, const char *buf, size_t size, off_t offset, ffi *fi) {
     (void) path;
-    printf("Been called lmao\n");
     op_t op_A = {.op = OP_WRITE, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_write = {fi = fi, .buf = buf, .size = size, .offset = offset}};
     op_t op_B = {.op = OP_WRITE, .mut = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER, .data.op_write = {fi = fi, .buf = buf, .size = size, .offset = offset}};
     return generic_enqueue_and_wait(&op_A, &op_B);
@@ -220,15 +225,15 @@ _Noreturn void *dispatcher_local(void *arg) {
     char pers = dispatcherParam->personality;
     queue_t *q;
     const char *prepath;
-    printf("ptr: %p\t, pers: %c\n", arg, dispatcherParam->personality);
+    printf("Local-spec dispatcher w/ ThreadID %lu, pers: %c reporting.\n", pthread_self(), dispatcherParam->personality);
     switch (dispatcherParam->personality) {
         case 'A':
             q = &wr_queue_A;
-            prepath = "/home/daniel/CLionProjects/elmeutfg/srcpnt";
+            prepath = "/home/daniel/CLionProjects/elmeutfg/ladoA";
             break;
         case 'B':
             q = &wr_queue_B;
-            prepath = "/home/daniel/CLionProjects/elmeutfg/altpnt";
+            prepath = "/home/daniel/CLionProjects/elmeutfg/ladoB";
             break;
         default:
             assert(0);
@@ -240,6 +245,9 @@ _Noreturn void *dispatcher_local(void *arg) {
         switch (nextop->op) {
             case OP_MKDIR:
                 retval = hello_mkdir_AB(nextop->data.op_mkdir.tgt_path, nextop->data.op_mkdir.mode, prepath);
+                break;
+            case OP_MKNOD:
+                retval = hello_mknod_AB(nextop->data.op_mknod.tgt_path, nextop->data.op_mknod.mode, prepath);
                 break;
             case OP_UNLINK:
                 retval = hello_unlink_AB(nextop->data.op_unlink.tgt_path, prepath);
@@ -300,6 +308,7 @@ void *dispatcher_remote() {
     // END init section
     for (;;) {
         char *msg_buf_cpy = msg_buf;
+        buf_size = -1;
         nextop = dequeue(q);
         switch (nextop->op) {
             case OP_MKDIR: {
@@ -312,6 +321,19 @@ void *dispatcher_remote() {
                 //set 1 data field
                 msg_buf_cpy += sizeof(*tmp);
                 memcpy(msg_buf_cpy, nextop->data.op_mkdir.tgt_path, tmp2->tgt_path_L);
+                //set total buf_size
+                buf_size = sizeof(ser_t) + tmp2->tgt_path_L;
+                break;
+            }
+            case OP_MKNOD: {
+                ser_t *tmp = (ser_t *) msg_buf;
+                tmp->op = OP_MKNOD;
+                ser_mknod_t *tmp2 = &tmp->data.ser_mknod;
+                tmp2->tgt_path_L = strlen(nextop->data.op_mknod.tgt_path) +1;
+                tmp2->mode = nextop->data.op_mknod.mode;
+                //set 1 data field
+                msg_buf_cpy += sizeof(*tmp);
+                memcpy(msg_buf_cpy, nextop->data.op_mknod.tgt_path, tmp2->tgt_path_L);
                 //set total buf_size
                 buf_size = sizeof(ser_t) + tmp2->tgt_path_L;
                 break;
@@ -381,6 +403,8 @@ void *dispatcher_remote() {
                 tmp->op = OP_RELEASE;
                 ser_release_t *tmp2 = &tmp->data.ser_release;
                 tmp2->fh = *obtain_dehacked_fh(nextop->data.op_release.fi, 'B');
+                //set total buf_size
+                buf_size = sizeof(ser_t);
                 break;
             }
             case OP_WRITE: {
@@ -401,9 +425,9 @@ void *dispatcher_remote() {
                 assert(0);
         }
         printf("TID %lu sending %zu\n", pthread_self(), buf_size);
-        nng_send(*sock, msg_buf, buf_size, 0);
+        cnc(nng_send(*sock, msg_buf, buf_size, 0));
         buf_size = 2 * 1024 * 1024;
-        nng_recv(*sock, msg_buf, &buf_size, 0);
+        cnc(nng_recv(*sock, msg_buf, &buf_size, 0));
         assert(buf_size == sizeof(ser_res_t));
         ser_res_t* result = (ser_res_t*) msg_buf;
         retval = result->retval;
@@ -420,14 +444,17 @@ void *dispatcher_remote() {
         pthread_cond_signal(&nextop->cond);
         pthread_mutex_unlock(&nextop->mut);
     }
+}
 
+int null_truncate(const char *path, off_t offset, ffi *fi) {
+    return 0;
 }
 
 static const struct fuse_operations hello_oper = {
         .init           = hello_init,
         .getattr        = hello_getattr,
         .readlink       = hello_readlink,
-        .mknod          = NULL,
+        .mknod          = hello_mknod,
         .mkdir          = hello_mkdir,
         .unlink         = hello_unlink,
         .rmdir          = hello_rmdir,
@@ -436,14 +463,12 @@ static const struct fuse_operations hello_oper = {
         .link           = NULL,
         .chmod          = NULL,
         .chown          = NULL,
-        .truncate       = NULL,
+        .truncate       = null_truncate,
         .open           = hello_open,
         .read           = hello_read,
         .write          = hello_write,
         .release        = hello_release,
-
         .readdir        = hello_readdir,
-
 };
 
 static void show_help(const char *progname) {
@@ -457,8 +482,6 @@ static void show_help(const char *progname) {
 }
 
 int main(int argc, char *argv[]) {
-    srcpnt = "/home/daniel/CLionProjects/elmeutfg/srcpnt";
-    altpnt = "/home/daniel/CLionProjects/elmeutfg/altpnt";
     int ret;
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     /* Set defaults -- we have to use strdup so that

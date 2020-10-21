@@ -18,11 +18,12 @@
 
 typedef struct fuse_file_info ffi;
 
-extern const char* srcpnt;
-extern const char* altpnt;
+static const char* ladoA = "/home/daniel/CLionProjects/elmeutfg/ladoA";
+static const char* ladoB = "/home/daniel/CLionProjects/elmeutfg/ladoB";
 
 enum op_enum {
     OP_MKDIR,
+    OP_MKNOD,
     OP_UNLINK,
     OP_RMDIR,
     OP_RENAME,
@@ -43,6 +44,11 @@ typedef struct {
     const char *tgt_path;
     mode_t mode;
 } op_mkdir_t;
+typedef struct {
+    const char *tgt_path;
+    mode_t mode;
+    // no dev_t because we won't use it anyway.
+} op_mknod_t;
 typedef struct {
     const char *tgt_path;
 } op_unlink_t;
@@ -69,6 +75,7 @@ typedef struct {
 
 typedef union {
     op_mkdir_t op_mkdir;
+    op_mknod_t op_mknod;
     op_unlink_t op_unlink;
     op_rmdir_t op_rmdir;
     op_rename_t op_rename;
@@ -93,6 +100,7 @@ int hello_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                   enum fuse_readdir_flags flags);
 int hello_readlink(const char *path, char *buf, size_t bufsize);
 int hello_mkdir_AB(const char *path, mode_t mode, const char *prepath);
+int hello_mknod_AB(const char *path, mode_t mode, const char *prepath);
 int hello_unlink_AB(const char *path, const char *prepath);
 int hello_rmdir_AB(const char *path, const char *prepath);
 int hello_rename_AB(const char *src_path, const char *dst_path, const char *prepath);
@@ -122,6 +130,10 @@ typedef struct {
 } ser_mkdir_t;
 typedef struct {
     int tgt_path_L;
+    mode_t mode;
+} ser_mknod_t;
+typedef struct {
+    int tgt_path_L;
 } ser_unlink_t;
 typedef struct {
     int tgt_path_L;
@@ -144,9 +156,9 @@ typedef struct {
     off_t offset;
 } ser_write_t;
 
-
 typedef union {
     ser_mkdir_t ser_mkdir;
+    ser_mknod_t ser_mknod;
     ser_unlink_t ser_unlink;
     ser_rmdir_t ser_rmdir;
     ser_rename_t ser_rename;
@@ -167,6 +179,10 @@ typedef struct {
 
 //Ackchyually max is unsigned short
 //1048576 max bytes (1MB)
+
+
+
+void cnc(int val);
 
 
 #endif //ELMEUTFG_RFSCOMMON_H
