@@ -1,0 +1,7 @@
+[testjob]
+size=128m
+rw=rw
+ioengine=psync
+verify=md5
+loops=10
+fallocate=none
